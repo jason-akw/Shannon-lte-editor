@@ -56,6 +56,9 @@ def _check_dependencies() -> None:
     if not _ask_to_install("protobuf", "google.protobuf"):
         missing.append("protobuf")
 
+    if not _ask_to_install("lz4", "lz4"):
+        missing.append("lz4")
+
     if not _ask_to_install("pyinstaller", "PyInstaller"):
         missing.append("pyinstaller")
 
@@ -102,6 +105,15 @@ from conf_id import (
     masks_to_conf_ids,
 )
 
+from s5300_confseq import (
+    S5300Bundle,
+    discover_s5300_families,
+    export_s5300_bundle,
+    format_s5300_json,
+    load_s5300_bundle,
+    parse_s5300_json,
+)
+
 from tools_ui import (
     open_auto_generate_dialog,
     open_combo_pruning_dialog,
@@ -119,6 +131,8 @@ class ComboEditorApp(tk.Tk):
 
         self.document = ComboDocument()
         self.current_path: Optional[Path] = None
+        self.s5300_bundle: Optional[S5300Bundle] = None
+        self.s5300_family: Optional[str] = None
         self.selected_combo_index: Optional[int] = None
         self.selected_component_index: Optional[int] = None
 
@@ -178,6 +192,15 @@ class ComboEditorApp(tk.Tk):
         )
         file_menu.add_separator()
         file_menu.add_command(
+            label="Import S5300 confseq folder...",
+            command=self.import_s5300_confseq_folder,
+        )
+        file_menu.add_command(
+            label="Import S5300 JSON...",
+            command=self.import_s5300_json,
+        )
+        file_menu.add_separator()
+        file_menu.add_command(
             label="Save",
             command=self.save_file,
             accelerator="Ctrl+S",
@@ -189,6 +212,15 @@ class ComboEditorApp(tk.Tk):
         file_menu.add_command(
             label="Export .txt...",
             command=self.save_text_file,
+        )
+        file_menu.add_separator()
+        file_menu.add_command(
+            label="Export S5300 confseq folder...",
+            command=self.export_s5300_confseq_folder,
+        )
+        file_menu.add_command(
+            label="Export S5300 JSON...",
+            command=self.export_s5300_json,
         )
         file_menu.add_separator()
         file_menu.add_command(
@@ -2924,9 +2956,271 @@ class ComboEditorApp(tk.Tk):
             "Band component moved"
         )
 
+    def _choose_s5300_family(
+        self,
+        families: list[str],
+    ) -> Optional[str]:
+        if not families:
+            return None
+        if len(families) == 1:
+            return families[0]
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Select S5300 LTE CA family")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+
+        content = ttk.Frame(dialog, padding=12)
+        content.pack(fill="both", expand=True)
+        ttk.Label(
+            content,
+            text="LTE CA family",
+        ).grid(row=0, column=0, sticky="w")
+
+        family_var = tk.StringVar(value=families[0])
+        selector = ttk.Combobox(
+            content,
+            textvariable=family_var,
+            values=families,
+            state="readonly",
+            width=max(24, max(map(len, families)) + 2),
+        )
+        selector.grid(row=1, column=0, columnspan=2, pady=(6, 12))
+
+        result: dict[str, Optional[str]] = {"family": None}
+
+        def accept() -> None:
+            result["family"] = family_var.get()
+            dialog.destroy()
+
+        ttk.Button(
+            content,
+            text="Cancel",
+            command=dialog.destroy,
+        ).grid(row=2, column=0, padx=(0, 6), sticky="e")
+        ttk.Button(
+            content,
+            text="Open",
+            command=accept,
+        ).grid(row=2, column=1, sticky="w")
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind("<Return>", lambda _event: accept())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.grab_set()
+        selector.focus_set()
+        self.wait_window(dialog)
+        return result["family"]
+
+    def _activate_s5300_document(
+        self,
+        document: ComboDocument,
+        family: str,
+        current_path: Path,
+        bundle: Optional[S5300Bundle],
+    ) -> None:
+        self.document = document
+        self.current_path = current_path
+        self.s5300_bundle = bundle
+        self.s5300_family = family
+        self.selected_combo_index = 0 if document.combos else None
+        self.selected_component_index = None
+        self.search_var.set("")
+        self.selected_plmn_conf_ids.clear()
+        self.plmn_filter_label_var.set("PLMN filter")
+        self.refresh_all()
+        self.title(
+            "Shannon LTE CA editor -> "
+            f"S5300 {family} ({current_path.name})"
+        )
+
+    def import_s5300_confseq_folder(self) -> None:
+        directory = filedialog.askdirectory(
+            title="Import S5300 carrierconfig confseq folder",
+            mustexist=True,
+        )
+        if not directory:
+            return
+
+        source_dir = Path(directory)
+        try:
+            families = discover_s5300_families(source_dir)
+        except (OSError, ParseError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("Import failed", str(exc))
+            return
+        if not families:
+            messagebox.showerror(
+                "Import failed",
+                "No complete S5300 LTE CA confseq family was found.",
+            )
+            return
+
+        family = self._choose_s5300_family(families)
+        if family is None:
+            return
+
+        try:
+            bundle = load_s5300_bundle(source_dir, family)
+        except (OSError, ParseError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("Import failed", str(exc))
+            return
+
+        self._activate_s5300_document(
+            bundle.document,
+            family,
+            source_dir,
+            bundle,
+        )
+        self.status_var.set(
+            f"Imported {len(bundle.document.combos)} S5300 "
+            f"combinations from {family}"
+        )
+
+    def import_s5300_json(self) -> None:
+        filename = filedialog.askopenfilename(
+            title="Import S5300 LTE CA JSON",
+            filetypes=[
+                ("JSON files", "*.json"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not filename:
+            return
+
+        path = Path(filename)
+        try:
+            family, document = parse_s5300_json(
+                path.read_text(encoding="utf-8")
+            )
+        except (
+            OSError,
+            UnicodeError,
+            ParseError,
+            ValueError,
+        ) as exc:
+            messagebox.showerror("Import failed", str(exc))
+            return
+
+        bundle = self.s5300_bundle
+        if bundle is not None and bundle.family != family:
+            bundle = None
+        self._activate_s5300_document(
+            document,
+            family,
+            path,
+            bundle,
+        )
+        status = (
+            f"Imported {len(document.combos)} S5300 combinations "
+            f"from {path.name}"
+        )
+        if bundle is None:
+            status += "; import a matching confseq folder to export raw files"
+        self.status_var.set(status)
+
+    def export_s5300_confseq_folder(self) -> None:
+        if self.s5300_bundle is None or self.s5300_family is None:
+            messagebox.showinfo(
+                "No S5300 confseq template",
+                "Import the matching S5300 confseq folder before exporting "
+                "raw confseq files.",
+            )
+            return
+
+        directory = filedialog.askdirectory(
+            title="Export modified S5300 confseq bundle",
+            mustexist=True,
+        )
+        if not directory:
+            return
+
+        output_dir = Path(directory)
+        try:
+            same_directory = (
+                output_dir.resolve() == self.s5300_bundle.source_dir.resolve()
+            )
+        except OSError:
+            same_directory = False
+        if same_directory and not messagebox.askyesno(
+            "Overwrite source confseqs?",
+            "This will replace the six source profiles for the selected "
+            "family. Continue?",
+        ):
+            return
+
+        try:
+            written = export_s5300_bundle(
+                self.s5300_bundle,
+                self.document,
+                output_dir,
+            )
+            exported_bundle = load_s5300_bundle(
+                output_dir,
+                self.s5300_family,
+            )
+        except (OSError, ParseError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("Export failed", str(exc))
+            return
+
+        self.s5300_bundle = exported_bundle
+        self.current_path = output_dir
+        self.title(
+            "Shannon LTE CA editor -> "
+            f"S5300 {self.s5300_family} ({output_dir.name})"
+        )
+        self.status_var.set(
+            f"Exported and verified {len(written)} S5300 confseq profiles "
+            f"to {output_dir}"
+        )
+        messagebox.showinfo(
+            "Export complete",
+            f"Exported and verified {len(written)} confseq profiles to:\n"
+            f"{output_dir}",
+        )
+
+    def export_s5300_json(self) -> None:
+        if self.s5300_family is None:
+            messagebox.showinfo(
+                "No S5300 document",
+                "Import an S5300 confseq folder or S5300 JSON first.",
+            )
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="Export S5300 LTE CA JSON",
+            defaultextension=".json",
+            initialfile=f"{self.s5300_family}.json",
+            filetypes=[
+                ("JSON files", "*.json"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not filename:
+            return
+
+        output_path = Path(filename)
+        try:
+            output_path.write_text(
+                format_s5300_json(self.document, self.s5300_family),
+                encoding="utf-8",
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Export failed", str(exc))
+            return
+
+        self.current_path = output_path
+        self.status_var.set(f"Exported S5300 JSON to {output_path}")
+        messagebox.showinfo(
+            "Export complete",
+            f"S5300 JSON saved as:\n{output_path}",
+        )
+
     def new_document(self) -> None:
         self.document = ComboDocument()
         self.current_path = None
+        self.s5300_bundle = None
+        self.s5300_family = None
         self.selected_combo_index = None
         self.selected_component_index = None
 
@@ -2987,6 +3281,8 @@ class ComboEditorApp(tk.Tk):
             )
             return
 
+        self.s5300_bundle = None
+        self.s5300_family = None
         self.current_path = path
         self.selected_combo_index = (
             0 if self.document.combos else None
@@ -3049,6 +3345,8 @@ class ComboEditorApp(tk.Tk):
             )
             return
 
+        self.s5300_bundle = None
+        self.s5300_family = None
         self.current_path = path
         self.selected_combo_index = (
             0 if self.document.combos else None
@@ -3071,6 +3369,13 @@ class ComboEditorApp(tk.Tk):
         )
 
     def save_text_file(self) -> None:
+        if self.s5300_family is not None:
+            messagebox.showinfo(
+                "S5300 document loaded",
+                "Use Export S5300 JSON or Export S5300 confseq folder for "
+                "this document.",
+            )
+            return
         if self.current_path is not None:
             default_name = f"{self.current_path.stem}_mod.txt"
         else:
@@ -3113,9 +3418,22 @@ class ComboEditorApp(tk.Tk):
         )
 
     def save_file(self) -> None:
+        if self.s5300_family is not None:
+            if self.s5300_bundle is not None:
+                self.export_s5300_confseq_folder()
+            else:
+                self.export_s5300_json()
+            return
         self.save_binary_file()
 
     def save_binary_file(self) -> None:
+        if self.s5300_family is not None:
+            messagebox.showinfo(
+                "S5300 document loaded",
+                "Use Export S5300 JSON or Export S5300 confseq folder for "
+                "this document.",
+            )
+            return
         if self.current_path is None:
             messagebox.showinfo(
                 "No file loaded",
@@ -3230,6 +3548,16 @@ class ComboEditorApp(tk.Tk):
         return "break"
 
 
-if __name__ == "__main__":
+def main() -> None:
     app = ComboEditorApp()
+    if "--smoke-test" in sys.argv:
+        app.withdraw()
+        app.update_idletasks()
+        print("GUI_SMOKE_OK")
+        app.destroy()
+        return
     app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

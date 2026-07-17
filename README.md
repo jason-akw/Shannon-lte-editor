@@ -1,7 +1,7 @@
 Shannon LTE CA editor
 =====================
 
-A Python/Tkinter GUI editor to modify LTE CA combos on Pixel 9 and 10, featuring useful tools to save editing effort.
+A Python/Tkinter GUI editor to modify LTE CA combos on Pixel devices, featuring useful tools to save editing effort.
 
 <img width="1000" alt="image" src="https://github.com/user-attachments/assets/bdec9472-ac56-4627-b4d4-c47ae4276a1f" />
 
@@ -11,6 +11,7 @@ Features
 
 - Import/export LTE .binarypb files directly
 - Import/export as protobuf .txt formats
+- Import/export S5300 carrierconfig confseq bundles and portable JSON
 - View LTE combinations in a searchable table w/plmn filtering
 - Edit LTE bands, assign DL/UL bw classes, MIMO, BCS, and plmn mappings
 - Add, duplicate, delete, and reorder any combos
@@ -48,11 +49,31 @@ However, you will need...
 
 - Python 3.10+
 - protobuf
+- lz4
 - PyInstaller (if you want to compile your own version)
 
 Install dependencies with:
 
-    py -m pip install protobuf pyinstaller
+    py -m pip install protobuf lz4 pyinstaller
+
+S5300 confseq support
+---------------------
+
+Older Shannon Pixel devices such as S5300 store LTE CA combinations as NV items
+inside carrierconfig confseq profiles instead of a standalone `.binarypb` file.
+Use **File > Import S5300 confseq folder** and select a complete `confseqs`
+directory. The editor detects the available `lte_ca` families and reads the
+combo count, bands, DL/UL classes, BCS, and both PLMN category bitmaps.
+
+Each family is exported as its six primary/mirror profiles. Existing common NVs,
+profile metadata, CLZ4 metadata, empty value groups, and signed 64-bit category
+masks are preserved. The exporter reloads the generated profiles before reporting
+success. JSON is an interchange format for combo data; raw confseq export still
+requires a matching imported confseq bundle as the device-specific template.
+
+Validate all detected families without opening the GUI:
+
+    py validate_s5300.py path\to\carrierconfig\confseqs
 
 Using the auto combo generator
 --------------------------
