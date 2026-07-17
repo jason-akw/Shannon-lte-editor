@@ -797,11 +797,13 @@ class ConfIdDialog(
         parent: tk.Misc,
         document: ComboDocument,
         on_changed: ToolCallback = None,
+        conf_id_names: Optional[dict[int, str]] = None,
     ) -> None:
         super().__init__(parent)
 
         self.parent = parent
         self.document = document
+        self.conf_id_names = dict(conf_id_names or CONF_ID_NAMES)
         self.on_changed = on_changed
 
         self.title(
@@ -1298,7 +1300,7 @@ class ConfIdDialog(
         visible_ids = [
             conf_id
             for conf_id
-            in sorted(CONF_ID_NAMES)
+            in sorted(self.conf_id_names)
             if conf_id != 0
         ]
 
@@ -1334,7 +1336,7 @@ class ConfIdDialog(
             ttk.Checkbutton(
                 checks,
                 text=(
-                    f"{CONF_ID_NAMES[conf_id]} "
+                    f"{self.conf_id_names[conf_id]} "
                     f"({conf_id})"
                 ),
                 variable=variable,
@@ -1521,11 +1523,13 @@ def open_conf_id_dialog(
     parent: tk.Misc,
     document: ComboDocument,
     on_changed: ToolCallback = None,
+    conf_id_names: Optional[dict[int, str]] = None,
 ) -> ConfIdDialog:
     return ConfIdDialog(
-        parent,
-        document,
-        on_changed,
+        parent=parent,
+        document=document,
+        on_changed=on_changed,
+        conf_id_names=conf_id_names,
     )
 
 class ValidationDialog(

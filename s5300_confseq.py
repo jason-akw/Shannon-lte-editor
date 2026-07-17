@@ -1,7 +1,6 @@
-"""S5300 confseq LTE CA bundle import, export, and JSON interchange."""
+"""S5300 confseq LTE CA bundle import and export."""
 
 import binascii
-import json
 import os
 import re
 import struct
@@ -18,9 +17,11 @@ from utils import Combo, ComboDocument, Component, ParseError
 CLZ4_HEADER = struct.Struct("<4sIII")
 CLZ4_MAGIC = b"CLZ4"
 COMBOS_PER_SEGMENT = 1000
-S5300_JSON_FORMAT = "shannon-lte-editor/s5300-confseq-v1"
+S5300_UL_AUTO_VALUE = 0xFFFF
 FAMILY_RE = re.compile(r"^(lte_ca(?:_0x[0-9A-Fa-f]+)?)_common$")
-FAMILY_NAME_RE = re.compile(r"^lte_ca(?:_0x[0-9A-Fa-f]+)?$")
+PLMN_PROFILE_NAME = "plmn_mapping_0x13F"
+PLMN_CATEGORY_IDS = "NRCAPA_CA_NV_PLMN_CATEGORY_ID"
+PLMN_CATEGORY_NAME_PREFIX = "NRCAPA_CA_NV_PLMN_NAME_FOR_PLMN_CATEGORY_ID_"
 COMBO_FIELDS = (
     "NUM_BAND",
     "BAND",
@@ -107,6 +108,7 @@ class S5300Bundle:
     family: str
     profiles: dict[str, ConfseqProfile]
     document: ComboDocument
+    conf_id_names: dict[int, str]
 
 
 def nv_crc(name: str) -> int:
@@ -255,6 +257,84 @@ def _segment_profile_name(family: str, combo_id: int) -> str:
     return f"{family}_{segment}"
 
 
+def load_s5300_conf_id_names(
+    profiles: dict[str, ConfseqProfile],
+) -> dict[int, str]:
+    profile = profiles.get(PLMN_PROFILE_NAME)
+    if profile is None:
+        return {0: "Default"}
+
+    mirror = profiles.get(f"{PLMN_PROFILE_NAME}.common")
+    if mirror is not None and _profile_signature(profile.message) != _profile_signature(
+        mirror.message
+    ):
+        raise ParseError(
+            f"S5300 mirror profile differs: {PLMN_PROFILE_NAME} / "
+            f"{PLMN_PROFILE_NAME}.common"
+        )
+
+    index = _nv_index(profile.message)
+    category_ids = _required_values(
+        index,
+        PLMN_CATEGORY_IDS,
+        PLMN_PROFILE_NAME,
+    )
+    if len(category_ids) != len(set(category_ids)):
+        raise ParseError("S5300 PLMN mapping contains duplicate category IDs")
+
+    result = {0: "Default"}
+    for category_id in category_ids:
+        if not 1 <= category_id <= 95:
+            raise ParseError(f"Invalid S5300 PLMN category ID: {category_id}")
+        values = _required_values(
+            index,
+            f"{PLMN_CATEGORY_NAME_PREFIX}{category_id}",
+            PLMN_PROFILE_NAME,
+        )
+        try:
+            name = bytes(value for value in values if value).decode("ascii")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ParseError(
+                f"Invalid S5300 PLMN category name for ID {category_id}"
+            ) from exc
+        if not name:
+            raise ParseError(f"Empty S5300 PLMN category name for ID {category_id}")
+        result[category_id] = name
+    return result
+
+
+def _validate_conf_id_names(conf_id_names: dict[int, str]) -> None:
+    if conf_id_names.get(0) != "Default":
+        raise ValueError("S5300 conf_id mapping must include 0=Default")
+    for category_id, name in conf_id_names.items():
+        if not 0 <= category_id <= 95 or not isinstance(name, str) or not name:
+            raise ValueError("Invalid S5300 conf_id name mapping")
+
+
+def _validate_conf_id_masks(
+    document: ComboDocument,
+    conf_id_names: dict[int, str],
+) -> None:
+    _validate_conf_id_names(conf_id_names)
+    allowed_low = sum(
+        1 << category_id
+        for category_id in conf_id_names
+        if category_id <= 63
+    )
+    allowed_high = sum(
+        1 << (category_id - 64)
+        for category_id in conf_id_names
+        if category_id >= 64
+    )
+    for combo_id, combo in enumerate(document.combos, start=1):
+        unknown_low = combo.configMaskLow & ~allowed_low
+        unknown_high = combo.configMaskHigh & ~allowed_high
+        if unknown_low or unknown_high:
+            raise ParseError(
+                f"Combo {combo_id} references undefined S5300 PLMN category bits"
+            )
+
+
 def _validate_document(document: ComboDocument) -> None:
     if not document.combos:
         raise ValueError("S5300 document must contain at least one LTE CA combo")
@@ -269,6 +349,15 @@ def _validate_document(document: ComboDocument) -> None:
             raise ValueError(f"Combo {combo_id} low category mask must fit in uint64")
         if not 0 <= combo.configMaskHigh <= 0xFFFFFFFF:
             raise ValueError(f"Combo {combo_id} high category mask must fit in uint32")
+        auto_ul_components = [
+            component.bwClassMimoUl == S5300_UL_AUTO_VALUE
+            for component in combo.components
+        ]
+        if any(auto_ul_components) and not all(auto_ul_components):
+            raise ValueError(
+                f"Combo {combo_id} mixes the S5300 Auto PCC marker with "
+                "explicit UL classes"
+            )
         for component in combo.components:
             for label, value in (
                 ("band", component.band),
@@ -368,11 +457,15 @@ def load_s5300_bundle(directory: Path, family: str) -> S5300Bundle:
         ))
 
     _validate_document(document)
+    conf_id_names = load_s5300_conf_id_names(all_profiles)
+    if PLMN_PROFILE_NAME in all_profiles:
+        _validate_conf_id_masks(document, conf_id_names)
     return S5300Bundle(
         source_dir=Path(directory),
         family=family,
         profiles=profiles,
         document=document,
+        conf_id_names=conf_id_names,
     )
 
 
@@ -492,60 +585,3 @@ def document_to_dict(document: ComboDocument) -> dict:
             for combo in document.combos
         ]
     }
-
-
-def document_from_dict(data: dict) -> ComboDocument:
-    try:
-        combos_data = data["combos"]
-        document = ComboDocument(
-            version=0,
-            bitmask=0,
-            combos=[
-                Combo(
-                    components=[
-                        Component(
-                            band=int(component["band"]),
-                            bwClassMimoDl=int(component["bwClassMimoDl"]),
-                            bwClassMimoUl=int(component["bwClassMimoUl"]),
-                        )
-                        for component in combo["components"]
-                    ],
-                    bcs=int(combo["bcs"]),
-                    configMaskLow=int(combo["configMaskLow"]),
-                    configMaskHigh=int(combo["configMaskHigh"]),
-                )
-                for combo in combos_data
-            ],
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ParseError(f"Invalid S5300 JSON document: {exc}") from exc
-    _validate_document(document)
-    return document
-
-
-def format_s5300_json(document: ComboDocument, family: str) -> str:
-    payload = {
-        "format": S5300_JSON_FORMAT,
-        "family": family,
-        "comboCount": len(document.combos),
-        **document_to_dict(document),
-    }
-    return json.dumps(payload, indent=2, ensure_ascii=True) + "\n"
-
-
-def parse_s5300_json(text: str):
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ParseError(f"Invalid S5300 JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ParseError("S5300 JSON root must be an object")
-    if payload.get("format") != S5300_JSON_FORMAT:
-        raise ParseError("Unsupported S5300 JSON format identifier")
-    family = payload.get("family")
-    if not isinstance(family, str) or not FAMILY_NAME_RE.fullmatch(family):
-        raise ParseError("S5300 JSON has an invalid LTE CA family")
-    document = document_from_dict(payload)
-    if payload.get("comboCount") != len(document.combos):
-        raise ParseError("S5300 JSON comboCount does not match the combo array")
-    return family, document

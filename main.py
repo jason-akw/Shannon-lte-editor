@@ -80,7 +80,6 @@ from utils import (
     DL_LABEL_TO_VALUE,
     DL_VALUE_OPTIONS,
     DL_VALUE_TO_LABEL,
-    UL_LABEL_TO_VALUE,
     UL_VALUE_OPTIONS,
     UL_VALUE_TO_LABEL,
     Combo,
@@ -106,12 +105,11 @@ from conf_id import (
 )
 
 from s5300_confseq import (
+    S5300_UL_AUTO_VALUE,
     S5300Bundle,
     discover_s5300_families,
     export_s5300_bundle,
-    format_s5300_json,
     load_s5300_bundle,
-    parse_s5300_json,
 )
 
 from tools_ui import (
@@ -120,6 +118,16 @@ from tools_ui import (
     open_conf_id_dialog,
     run_validate_tool,
 )
+
+S5300_UL_VALUE_OPTIONS = [
+    ("0", "0 (None)"),
+    ("32768", "32768 (A)"),
+    ("16384", "16384 (B)"),
+    ("8192", "8192 (C)"),
+    ("4096", "4096 (D)"),
+    (str(S5300_UL_AUTO_VALUE), "Auto PCC (all bands)"),
+]
+
 
 class ComboEditorApp(tk.Tk):
     def __init__(self) -> None:
@@ -133,6 +141,7 @@ class ComboEditorApp(tk.Tk):
         self.current_path: Optional[Path] = None
         self.s5300_bundle: Optional[S5300Bundle] = None
         self.s5300_family: Optional[str] = None
+        self.conf_id_names = dict(CONF_ID_NAMES)
         self.selected_combo_index: Optional[int] = None
         self.selected_component_index: Optional[int] = None
 
@@ -195,10 +204,6 @@ class ComboEditorApp(tk.Tk):
             label="Import S5300 confseq folder...",
             command=self.import_s5300_confseq_folder,
         )
-        file_menu.add_command(
-            label="Import S5300 JSON...",
-            command=self.import_s5300_json,
-        )
         file_menu.add_separator()
         file_menu.add_command(
             label="Save",
@@ -217,10 +222,6 @@ class ComboEditorApp(tk.Tk):
         file_menu.add_command(
             label="Export S5300 confseq folder...",
             command=self.export_s5300_confseq_folder,
-        )
-        file_menu.add_command(
-            label="Export S5300 JSON...",
-            command=self.export_s5300_json,
         )
         file_menu.add_separator()
         file_menu.add_command(
@@ -499,7 +500,7 @@ class ComboEditorApp(tk.Tk):
             "index": 45,
             "dl_combo": 150,
             "dl_mimo": 150,
-            "ul_combo": 80,
+            "ul_combo": 150,
             "dl_ccs": 50,
             "ul_ccs": 50,
             "bcs": 80,
@@ -1136,35 +1137,35 @@ class ComboEditorApp(tk.Tk):
             )
 
         else:
+            ul_options = self._ul_value_options()
             editor = ttk.Combobox(
                 self.component_tree,
                 values=[
                     label
                     for _value, label
-                    in UL_VALUE_OPTIONS
+                    in ul_options
                 ],
                 state="readonly",
             )
 
             editor.set(
-                UL_VALUE_TO_LABEL.get(
-                    str(component.bwClassMimoUl),
-                    str(component.bwClassMimoUl),
-                )
+                self._ul_label(component.bwClassMimoUl)
             )
 
             def commit_ul(
                 _event=None,
             ) -> None:
-                raw_value = UL_LABEL_TO_VALUE.get(
+                raw_value = self._ul_label_to_value().get(
                     editor.get()
                 )
 
                 if raw_value is None:
                     return
 
-                component.bwClassMimoUl = int(
-                    raw_value
+                self._set_component_ul_value(
+                    combo,
+                    component_index,
+                    int(raw_value),
                 )
 
                 self._finish_component_cell_edit(
@@ -1238,30 +1239,6 @@ class ComboEditorApp(tk.Tk):
     ) -> None:
         self._close_component_cell_editor()
 
-        self.selected_component_index = (
-            component_index
-        )
-
-        self.refresh_combo_tree(
-            self.selected_combo_index
-        )
-
-        self.refresh_component_tree(
-            component_index
-        )
-
-        self.status_var.set(
-            status_message
-        )
-
-
-    def _finish_component_cell_edit(
-        self,
-        component_index: int,
-        status_message: str,
-    ) -> None:
-        self._close_component_cell_editor()
-
         combo = self.get_selected_combo()
 
         if combo is None:
@@ -1278,38 +1255,31 @@ class ComboEditorApp(tk.Tk):
             component_index
         )
 
-        component = combo.components[
-            component_index
-        ]
-
         component_row_id = str(
             component_index
         )
 
-        dl_label = DL_VALUE_TO_LABEL.get(
-            str(component.bwClassMimoDl),
-            str(component.bwClassMimoDl),
-        )
-
-        ul_label = UL_VALUE_TO_LABEL.get(
-            str(component.bwClassMimoUl),
-            str(component.bwClassMimoUl),
-        )
-
-        # Update only the edited component row.
-        if self.component_tree.exists(
-            component_row_id
-        ):
+        # Auto PCC is a combo-level mode, so changing one UL cell can update
+        # every component row.
+        for row_index, component in enumerate(combo.components):
+            row_id = str(row_index)
+            if not self.component_tree.exists(row_id):
+                continue
+            dl_label = DL_VALUE_TO_LABEL.get(
+                str(component.bwClassMimoDl),
+                str(component.bwClassMimoDl),
+            )
             self.component_tree.item(
-                component_row_id,
+                row_id,
                 values=(
-                    component_index + 1,
+                    row_index + 1,
                     component.band,
                     dl_label,
-                    ul_label,
+                    self._ul_label(component.bwClassMimoUl),
                 ),
             )
 
+        if self.component_tree.exists(component_row_id):
             self.component_tree.selection_set(
                 component_row_id
             )
@@ -1442,6 +1412,7 @@ class ComboEditorApp(tk.Tk):
         open_conf_id_dialog(
             parent=self,
             document=self.document,
+            conf_id_names=self.conf_id_names,
             on_changed=(
                 self._on_document_tool_changed
             ),
@@ -1576,6 +1547,53 @@ class ComboEditorApp(tk.Tk):
         key = str(raw_value)
         return value_to_label.get(key, key)
 
+    def _ul_value_options(self) -> list[tuple[str, str]]:
+        if self.s5300_family is not None:
+            return S5300_UL_VALUE_OPTIONS
+        return UL_VALUE_OPTIONS
+
+    def _ul_value_to_label(self) -> dict[str, str]:
+        return dict(self._ul_value_options())
+
+    def _ul_label_to_value(self) -> dict[str, str]:
+        return {
+            label: value
+            for value, label in self._ul_value_options()
+        }
+
+    def _ul_label(self, value: int) -> str:
+        return self._dropdown_label(
+            value,
+            self._ul_value_to_label(),
+        )
+
+    def _is_s5300_auto_ul_combo(self, combo: Combo) -> bool:
+        return (
+            self.s5300_family is not None
+            and bool(combo.components)
+            and all(
+                component.bwClassMimoUl == S5300_UL_AUTO_VALUE
+                for component in combo.components
+            )
+        )
+
+    def _set_component_ul_value(
+        self,
+        combo: Combo,
+        component_index: int,
+        value: int,
+    ) -> None:
+        if self.s5300_family is not None:
+            if value == S5300_UL_AUTO_VALUE:
+                for component in combo.components:
+                    component.bwClassMimoUl = S5300_UL_AUTO_VALUE
+                return
+            if self._is_s5300_auto_ul_combo(combo):
+                for component in combo.components:
+                    component.bwClassMimoUl = 0
+
+        combo.components[component_index].bwClassMimoUl = value
+
     @staticmethod
     def _normalize_search_text(value: str) -> str:
         return re.sub(
@@ -1628,6 +1646,24 @@ class ComboEditorApp(tk.Tk):
         index: int,
         combo: Combo,
     ) -> tuple:
+        if self._is_s5300_auto_ul_combo(combo):
+            auto_ul_bands = list(dict.fromkeys(
+                component.band for component in combo.components
+            ))
+            ul_description = "Auto PCC (" + " / ".join(
+                str(band) for band in auto_ul_bands
+            ) + ")"
+            ul_component_count = 1
+        else:
+            ul_description = describe_direction_combo(
+                combo,
+                "bwClassMimoUl",
+            )
+            ul_component_count = count_direction_components(
+                combo,
+                "bwClassMimoUl",
+            )
+
         return (
             index + 1,
             describe_direction_combo(
@@ -1635,18 +1671,12 @@ class ComboEditorApp(tk.Tk):
                 "bwClassMimoDl",
             ),
             describe_dl_mimo(combo),
-            describe_direction_combo(
-                combo,
-                "bwClassMimoUl",
-            ),
+            ul_description,
             count_direction_components(
                 combo,
                 "bwClassMimoDl",
             ),
-            count_direction_components(
-                combo,
-                "bwClassMimoUl",
-            ),
+            ul_component_count,
             describe_bcs_mask(combo.bcs),
             str(combo.configMaskLow),
             str(combo.configMaskHigh),
@@ -1745,7 +1775,7 @@ class ComboEditorApp(tk.Tk):
         visible_conf_ids = [
             conf_id
             for conf_id in sorted(
-                CONF_ID_NAMES
+                self.conf_id_names
             )
             if conf_id != 0
         ]
@@ -1770,7 +1800,7 @@ class ComboEditorApp(tk.Tk):
             ttk.Checkbutton(
                 checkbox_frame,
                 text=(
-                    f"{CONF_ID_NAMES[conf_id]} "
+                    f"{self.conf_id_names[conf_id]} "
                     f"({conf_id})"
                 ),
                 variable=variable,
@@ -2013,9 +2043,8 @@ class ComboEditorApp(tk.Tk):
                 str(component.bwClassMimoDl),
             )
 
-            ul_label = UL_VALUE_TO_LABEL.get(
-                str(component.bwClassMimoUl),
-                str(component.bwClassMimoUl),
+            ul_label = self._ul_label(
+                component.bwClassMimoUl
             )
 
             self.component_tree.insert(
@@ -2226,10 +2255,7 @@ class ComboEditorApp(tk.Tk):
             )
         )
         self.ul_var.set(
-            self._dropdown_label(
-                component.bwClassMimoUl,
-                UL_VALUE_TO_LABEL,
-            )
+            self._ul_label(component.bwClassMimoUl)
         )
 
     def clear_component_editor(self) -> None:
@@ -2630,7 +2656,7 @@ class ComboEditorApp(tk.Tk):
         visible_conf_ids = [
             conf_id
             for conf_id in sorted(
-                CONF_ID_NAMES
+                self.conf_id_names
             )
             if conf_id != 0
         ]
@@ -2659,7 +2685,7 @@ class ComboEditorApp(tk.Tk):
             ttk.Checkbutton(
                 checkbox_frame,
                 text=(
-                    f"{CONF_ID_NAMES[conf_id]} "
+                    f"{self.conf_id_names[conf_id]} "
                     f"({conf_id})"
                 ),
                 variable=variable,
@@ -2785,11 +2811,16 @@ class ComboEditorApp(tk.Tk):
             )
             return
 
+        ul_value = (
+            S5300_UL_AUTO_VALUE
+            if self._is_s5300_auto_ul_combo(combo)
+            else 0
+        )
         combo.components.append(
             Component(
                 band=1,
                 bwClassMimoDl=32768,
-                bwClassMimoUl=0,
+                bwClassMimoUl=ul_value,
             )
         )
 
@@ -2835,9 +2866,15 @@ class ComboEditorApp(tk.Tk):
         self,
         show_no_selection: bool = True,
     ) -> None:
+        combo = self.get_selected_combo()
         component = self.get_selected_component()
+        component_index = self.selected_component_index
 
-        if component is None:
+        if (
+            combo is None
+            or component is None
+            or component_index is None
+        ):
             if show_no_selection:
                 messagebox.showinfo(
                     "No selection",
@@ -2857,12 +2894,10 @@ class ComboEditorApp(tk.Tk):
                     "DL value",
                 )
             )
-            component.bwClassMimoUl = (
-                self._dropdown_value(
-                    self.ul_var.get(),
-                    UL_LABEL_TO_VALUE,
-                    "UL value",
-                )
+            ul_value = self._dropdown_value(
+                self.ul_var.get(),
+                self._ul_label_to_value(),
+                "UL value",
             )
         except ValueError as exc:
             messagebox.showerror(
@@ -2870,6 +2905,12 @@ class ComboEditorApp(tk.Tk):
                 str(exc),
             )
             return
+
+        self._set_component_ul_value(
+            combo,
+            component_index,
+            ul_value,
+        )
 
         self.refresh_component_tree(
             self.selected_component_index
@@ -3019,11 +3060,13 @@ class ComboEditorApp(tk.Tk):
         family: str,
         current_path: Path,
         bundle: Optional[S5300Bundle],
+        conf_id_names: dict[int, str],
     ) -> None:
         self.document = document
         self.current_path = current_path
         self.s5300_bundle = bundle
         self.s5300_family = family
+        self.conf_id_names = dict(conf_id_names)
         self.selected_combo_index = 0 if document.combos else None
         self.selected_component_index = None
         self.search_var.set("")
@@ -3071,53 +3114,12 @@ class ComboEditorApp(tk.Tk):
             family,
             source_dir,
             bundle,
+            bundle.conf_id_names,
         )
         self.status_var.set(
             f"Imported {len(bundle.document.combos)} S5300 "
             f"combinations from {family}"
         )
-
-    def import_s5300_json(self) -> None:
-        filename = filedialog.askopenfilename(
-            title="Import S5300 LTE CA JSON",
-            filetypes=[
-                ("JSON files", "*.json"),
-                ("All files", "*.*"),
-            ],
-        )
-        if not filename:
-            return
-
-        path = Path(filename)
-        try:
-            family, document = parse_s5300_json(
-                path.read_text(encoding="utf-8")
-            )
-        except (
-            OSError,
-            UnicodeError,
-            ParseError,
-            ValueError,
-        ) as exc:
-            messagebox.showerror("Import failed", str(exc))
-            return
-
-        bundle = self.s5300_bundle
-        if bundle is not None and bundle.family != family:
-            bundle = None
-        self._activate_s5300_document(
-            document,
-            family,
-            path,
-            bundle,
-        )
-        status = (
-            f"Imported {len(document.combos)} S5300 combinations "
-            f"from {path.name}"
-        )
-        if bundle is None:
-            status += "; import a matching confseq folder to export raw files"
-        self.status_var.set(status)
 
     def export_s5300_confseq_folder(self) -> None:
         if self.s5300_bundle is None or self.s5300_family is None:
@@ -3164,6 +3166,7 @@ class ComboEditorApp(tk.Tk):
             return
 
         self.s5300_bundle = exported_bundle
+        self.s5300_bundle.conf_id_names = dict(self.conf_id_names)
         self.current_path = output_dir
         self.title(
             "Shannon LTE CA editor -> "
@@ -3179,48 +3182,12 @@ class ComboEditorApp(tk.Tk):
             f"{output_dir}",
         )
 
-    def export_s5300_json(self) -> None:
-        if self.s5300_family is None:
-            messagebox.showinfo(
-                "No S5300 document",
-                "Import an S5300 confseq folder or S5300 JSON first.",
-            )
-            return
-
-        filename = filedialog.asksaveasfilename(
-            title="Export S5300 LTE CA JSON",
-            defaultextension=".json",
-            initialfile=f"{self.s5300_family}.json",
-            filetypes=[
-                ("JSON files", "*.json"),
-                ("All files", "*.*"),
-            ],
-        )
-        if not filename:
-            return
-
-        output_path = Path(filename)
-        try:
-            output_path.write_text(
-                format_s5300_json(self.document, self.s5300_family),
-                encoding="utf-8",
-            )
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Export failed", str(exc))
-            return
-
-        self.current_path = output_path
-        self.status_var.set(f"Exported S5300 JSON to {output_path}")
-        messagebox.showinfo(
-            "Export complete",
-            f"S5300 JSON saved as:\n{output_path}",
-        )
-
     def new_document(self) -> None:
         self.document = ComboDocument()
         self.current_path = None
         self.s5300_bundle = None
         self.s5300_family = None
+        self.conf_id_names = dict(CONF_ID_NAMES)
         self.selected_combo_index = None
         self.selected_component_index = None
 
@@ -3283,6 +3250,7 @@ class ComboEditorApp(tk.Tk):
 
         self.s5300_bundle = None
         self.s5300_family = None
+        self.conf_id_names = dict(CONF_ID_NAMES)
         self.current_path = path
         self.selected_combo_index = (
             0 if self.document.combos else None
@@ -3347,6 +3315,7 @@ class ComboEditorApp(tk.Tk):
 
         self.s5300_bundle = None
         self.s5300_family = None
+        self.conf_id_names = dict(CONF_ID_NAMES)
         self.current_path = path
         self.selected_combo_index = (
             0 if self.document.combos else None
@@ -3372,8 +3341,7 @@ class ComboEditorApp(tk.Tk):
         if self.s5300_family is not None:
             messagebox.showinfo(
                 "S5300 document loaded",
-                "Use Export S5300 JSON or Export S5300 confseq folder for "
-                "this document.",
+                "Use Export S5300 confseq folder for this document.",
             )
             return
         if self.current_path is not None:
@@ -3419,10 +3387,7 @@ class ComboEditorApp(tk.Tk):
 
     def save_file(self) -> None:
         if self.s5300_family is not None:
-            if self.s5300_bundle is not None:
-                self.export_s5300_confseq_folder()
-            else:
-                self.export_s5300_json()
+            self.export_s5300_confseq_folder()
             return
         self.save_binary_file()
 
@@ -3430,8 +3395,7 @@ class ComboEditorApp(tk.Tk):
         if self.s5300_family is not None:
             messagebox.showinfo(
                 "S5300 document loaded",
-                "Use Export S5300 JSON or Export S5300 confseq folder for "
-                "this document.",
+                "Use Export S5300 confseq folder for this document.",
             )
             return
         if self.current_path is None:

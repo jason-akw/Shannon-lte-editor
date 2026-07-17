@@ -11,7 +11,7 @@ Features
 
 - Import/export LTE .binarypb files directly
 - Import/export as protobuf .txt formats
-- Import/export S5300 carrierconfig confseq bundles and portable JSON
+- Import/export S5300 carrierconfig confseq bundles
 - View LTE combinations in a searchable table w/plmn filtering
 - Edit LTE bands, assign DL/UL bw classes, MIMO, BCS, and plmn mappings
 - Add, duplicate, delete, and reorder any combos
@@ -64,12 +64,14 @@ inside carrierconfig confseq profiles instead of a standalone `.binarypb` file.
 Use **File > Import S5300 confseq folder** and select a complete `confseqs`
 directory. The editor detects the available `lte_ca` families and reads the
 combo count, bands, DL/UL classes, BCS, and both PLMN category bitmaps.
+The conf_id names and valid bit positions are read from that same device's
+`plmn_mapping_0x13F` confseq profile; the Pixel 9/10 static name table is not
+used for an S5300 document.
 
 Each family is exported as its six primary/mirror profiles. Existing common NVs,
 profile metadata, CLZ4 metadata, empty value groups, and signed 64-bit category
 masks are preserved. The exporter reloads the generated profiles before reporting
-success. JSON is an interchange format for combo data; raw confseq export still
-requires a matching imported confseq bundle as the device-specific template.
+success.
 
 Validate all detected families without opening the GUI:
 

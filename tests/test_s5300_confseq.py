@@ -5,14 +5,13 @@ from pathlib import Path
 from s5300_confseq import (
     CONFSEQ_MESSAGE,
     Clz4Metadata,
+    S5300_UL_AUTO_VALUE,
     decode_confseq_blob,
     document_to_dict,
     encode_confseq_blob,
     export_s5300_bundle,
-    format_s5300_json,
     load_s5300_bundle,
     nv_crc,
-    parse_s5300_json,
 )
 from utils import Combo, Component, ParseError
 
@@ -58,14 +57,31 @@ def fixture_combos():
                 Component(band=3, bwClassMimoDl=32768, bwClassMimoUl=0),
             ],
             bcs=0,
-            configMaskLow=0xFFFFFFFFFFFFFFFF,
-            configMaskHigh=0xFFFFFFFF,
+            configMaskLow=(1 << 63) | (1 << 31) | 3,
+            configMaskHigh=1 << (82 - 64),
         ),
         Combo(
             components=[Component(band=7, bwClassMimoDl=8192, bwClassMimoUl=8192)],
             bcs=3,
             configMaskLow=4,
             configMaskHigh=2,
+        ),
+        Combo(
+            components=[
+                Component(
+                    band=1,
+                    bwClassMimoDl=32768,
+                    bwClassMimoUl=S5300_UL_AUTO_VALUE,
+                ),
+                Component(
+                    band=3,
+                    bwClassMimoDl=32768,
+                    bwClassMimoUl=S5300_UL_AUTO_VALUE,
+                ),
+            ],
+            bcs=3221225472,
+            configMaskLow=1,
+            configMaskHigh=0,
         ),
     ]
 
@@ -95,6 +111,37 @@ def write_fixture(directory: Path):
             name = output.Name.replace(".", "_")
             (directory / name).write_bytes(raw)
 
+    plmn = CONFSEQ_MESSAGE()
+    plmn.Revision = "test-revision"
+    plmn.Name = "plmn_mapping_0x13F"
+    append_nv(
+        plmn,
+        "NRCAPA_CA_NV_PLMN_CATEGORY_ID",
+        [1, 2, 3, 31, 63, 65, 82],
+    )
+    for category_id, name in (
+        (1, "VZW"),
+        (2, "TMO"),
+        (3, "ATT"),
+        (31, "WILDCARD"),
+        (63, "APAC_COMMON"),
+        (65, "1_1_DE"),
+        (82, "MX_COMMON"),
+    ):
+        append_nv(
+            plmn,
+            f"NRCAPA_CA_NV_PLMN_NAME_FOR_PLMN_CATEGORY_ID_{category_id}",
+            name.encode("ascii"),
+        )
+    for mirror in (False, True):
+        output = CONFSEQ_MESSAGE()
+        output.ParseFromString(plmn.SerializeToString())
+        if mirror:
+            output.Name += ".common"
+        raw = encode_confseq_blob(output.SerializeToString(), metadata)
+        name = output.Name.replace(".", "_")
+        (directory / name).write_bytes(raw)
+
 
 class S5300ConfseqTests(unittest.TestCase):
     def test_raw_bundle_round_trip_preserves_common_nv_and_mirrors(self):
@@ -102,6 +149,19 @@ class S5300ConfseqTests(unittest.TestCase):
             source = Path(source_name)
             write_fixture(source)
             bundle = load_s5300_bundle(source, FAMILY)
+            self.assertEqual(
+                bundle.conf_id_names,
+                {
+                    0: "Default",
+                    1: "VZW",
+                    2: "TMO",
+                    3: "ATT",
+                    31: "WILDCARD",
+                    63: "APAC_COMMON",
+                    65: "1_1_DE",
+                    82: "MX_COMMON",
+                },
+            )
             self.assertEqual(document_to_dict(bundle.document)["combos"], [
                 {
                     "components": [
@@ -109,8 +169,8 @@ class S5300ConfseqTests(unittest.TestCase):
                         {"band": 3, "bwClassMimoDl": 32768, "bwClassMimoUl": 0},
                     ],
                     "bcs": 0,
-                    "configMaskLow": 0xFFFFFFFFFFFFFFFF,
-                    "configMaskHigh": 0xFFFFFFFF,
+                    "configMaskLow": (1 << 63) | (1 << 31) | 3,
+                    "configMaskHigh": 1 << (82 - 64),
                 },
                 {
                     "components": [
@@ -119,6 +179,23 @@ class S5300ConfseqTests(unittest.TestCase):
                     "bcs": 3,
                     "configMaskLow": 4,
                     "configMaskHigh": 2,
+                },
+                {
+                    "components": [
+                        {
+                            "band": 1,
+                            "bwClassMimoDl": 32768,
+                            "bwClassMimoUl": S5300_UL_AUTO_VALUE,
+                        },
+                        {
+                            "band": 3,
+                            "bwClassMimoDl": 32768,
+                            "bwClassMimoUl": S5300_UL_AUTO_VALUE,
+                        },
+                    ],
+                    "bcs": 3221225472,
+                    "configMaskLow": 1,
+                    "configMaskHigh": 0,
                 },
             ])
 
@@ -166,20 +243,6 @@ class S5300ConfseqTests(unittest.TestCase):
                 self.assertEqual(metadata.checksum, 0x12345678)
                 self.assertEqual(metadata.trailing, b"tail")
 
-    def test_json_round_trip_and_root_validation(self):
-        with tempfile.TemporaryDirectory() as source_name:
-            source = Path(source_name)
-            write_fixture(source)
-            document = load_s5300_bundle(source, FAMILY).document
-            family, parsed = parse_s5300_json(
-                format_s5300_json(document, FAMILY)
-            )
-            self.assertEqual(family, FAMILY)
-            self.assertEqual(document_to_dict(parsed), document_to_dict(document))
-
-        with self.assertRaises(ParseError):
-            parse_s5300_json("[]")
-
     def test_unknown_segment_nv_is_rejected(self):
         with tempfile.TemporaryDirectory() as source_name:
             source = Path(source_name)
@@ -196,6 +259,21 @@ class S5300ConfseqTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ParseError, "not a pure LTE combo segment"):
                 load_s5300_bundle(source, FAMILY)
+
+    def test_auto_pcc_marker_cannot_be_mixed_with_explicit_ul(self):
+        with tempfile.TemporaryDirectory() as source_name:
+            source = Path(source_name)
+            write_fixture(source)
+            bundle = load_s5300_bundle(source, FAMILY)
+            bundle.document.combos[2].components[1].bwClassMimoUl = 0
+
+            with tempfile.TemporaryDirectory() as output_name:
+                with self.assertRaisesRegex(ValueError, "mixes the S5300 Auto PCC"):
+                    export_s5300_bundle(
+                        bundle,
+                        bundle.document,
+                        Path(output_name),
+                    )
 
 
 if __name__ == "__main__":
