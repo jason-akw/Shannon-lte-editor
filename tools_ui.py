@@ -23,7 +23,6 @@ from utils import (
     auto_fill_ul_bands,
     auto_fill_ulca,
     fix_validation_issues,
-    repair_and_deduplicate,
     validate_document,
 )
 
@@ -97,12 +96,14 @@ class AutoGenerateCombosDialog(
         parent: tk.Misc,
         document: ComboDocument,
         on_changed: ToolCallback = None,
+        supports_auto_pcc: bool = False,
     ) -> None:
         super().__init__(parent)
 
         self.parent = parent
         self.document = document
         self.on_changed = on_changed
+        self.supports_auto_pcc = supports_auto_pcc
 
         self.title(
             "Auto generate combos"
@@ -135,6 +136,18 @@ class AutoGenerateCombosDialog(
 
         self.ul_mode_var = tk.StringVar(
             value="disable"
+        )
+
+        self.use_auto_pcc_var = (
+            tk.BooleanVar(
+                value=False
+            )
+        )
+
+        self.apply_ul_to_all_var = (
+            tk.BooleanVar(
+                value=False
+            )
         )
 
         self.allow_fdd_tdd_ulca_var = (
@@ -396,6 +409,30 @@ class AutoGenerateCombosDialog(
             side="left"
         )
 
+        self.auto_pcc_check = ttk.Checkbutton(
+            frame,
+            text=(
+                "Use Auto PCC for single-PCC variants"
+            ),
+            variable=self.use_auto_pcc_var,
+        )
+
+        self.auto_pcc_check.pack(
+            anchor="w",
+            pady=(10, 0),
+        )
+
+        ttk.Checkbutton(
+            frame,
+            text=(
+                "Apply UL generation to all document combos"
+            ),
+            variable=self.apply_ul_to_all_var,
+        ).pack(
+            anchor="w",
+            pady=(6, 0),
+        )
+
         ulca_options = ttk.Frame(
             frame
         )
@@ -440,6 +477,16 @@ class AutoGenerateCombosDialog(
     def _update_ul_state(
         self,
     ) -> None:
+        if self.supports_auto_pcc:
+            self.auto_pcc_check.configure(
+                state="normal"
+            )
+        else:
+            self.use_auto_pcc_var.set(False)
+            self.auto_pcc_check.configure(
+                state="disabled"
+            )
+
         controls = (
             self.allow_fdd_aa_check,
             self.allow_tdd_aa_check,
@@ -489,7 +536,11 @@ class AutoGenerateCombosDialog(
             except KeyError as exc:
                 raise ValueError("Select a valid default BCS.") from exc
 
-            added_dl, skipped_dl = generate_custom_combos(
+            (
+                added_dl,
+                skipped_dl,
+                involved_dl_signatures,
+            ) = generate_custom_combos(
                 self.document,
                 theoretical,
                 max_cc,
@@ -503,14 +554,30 @@ class AutoGenerateCombosDialog(
             ]
 
             ul_mode = self.ul_mode_var.get()
+            use_auto_pcc = (
+                self.supports_auto_pcc
+                and self.use_auto_pcc_var.get()
+            )
+            target_dl_signatures = (
+                None
+                if self.apply_ul_to_all_var.get()
+                else involved_dl_signatures
+            )
 
             if ul_mode == "disable":
-                added_ul = auto_fill_ul_bands(self.document)
-                repaired_ul, removed_duplicates = repair_and_deduplicate(self.document)
+                added_ul = auto_fill_ul_bands(
+                    self.document,
+                    use_auto_pcc=use_auto_pcc,
+                    supports_auto_pcc=self.supports_auto_pcc,
+                    target_dl_signatures=target_dl_signatures,
+                )
 
-                summary.append(f"Single-band Class-A UL variants added: {added_ul}")
-                summary.append(f"Missing UL assignments filled: {repaired_ul}")
-                summary.append(f"Duplicate configurations removed: {removed_duplicates}")
+                if use_auto_pcc:
+                    summary.append(
+                        f"Auto PCC or fallback UL variants added: {added_ul}"
+                    )
+                else:
+                    summary.append(f"Single-band Class-A UL variants added: {added_ul}")
 
             elif ul_mode == "autofill":
                 added_ul = auto_fill_ulca(
@@ -518,12 +585,12 @@ class AutoGenerateCombosDialog(
                     allow_fdd_aa_ulca=self.allow_fdd_aa_ulca_var.get(),
                     allow_tdd_aa_ulca=self.allow_tdd_aa_ulca_var.get(),
                     allow_fdd_tdd_ulca=self.allow_fdd_tdd_ulca_var.get(),
+                    use_auto_pcc=use_auto_pcc,
+                    supports_auto_pcc=self.supports_auto_pcc,
+                    target_dl_signatures=target_dl_signatures,
                 )
-                repaired_ul, removed_duplicates = repair_and_deduplicate(self.document)
 
                 summary.append(f"UL and ULCA variants added: {added_ul}")
-                summary.append(f"Missing UL assignments filled: {repaired_ul}")
-                summary.append(f"Duplicate configurations removed: {removed_duplicates}")
 
         except (RuntimeError, ValueError) as exc:
             messagebox.showerror("Auto generation failed", str(exc), parent=self)
@@ -1499,11 +1566,13 @@ def open_auto_generate_dialog(
     parent: tk.Misc,
     document: ComboDocument,
     on_changed: ToolCallback = None,
+    supports_auto_pcc: bool = False,
 ) -> AutoGenerateCombosDialog:
     return AutoGenerateCombosDialog(
         parent,
         document,
         on_changed,
+        supports_auto_pcc,
     )
 
 
@@ -1541,6 +1610,7 @@ class ValidationDialog(
         document: ComboDocument,
         on_changed: ToolCallback = None,
         on_highlight: HighlightCallback = None,
+        supports_auto_pcc: bool = False,
     ) -> None:
         super().__init__(parent)
 
@@ -1548,6 +1618,7 @@ class ValidationDialog(
         self.document = document
         self.on_changed = on_changed
         self.on_highlight = on_highlight
+        self.supports_auto_pcc = supports_auto_pcc
 
         self.title(
             "Validate combos"
@@ -1786,6 +1857,7 @@ class ValidationDialog(
         results = fix_validation_issues(
             self.document,
             self.report,
+            supports_auto_pcc=self.supports_auto_pcc,
         )
 
         summary = (
@@ -1828,6 +1900,7 @@ def run_validate_tool(
     document: ComboDocument,
     on_changed: ToolCallback = None,
     on_highlight: HighlightCallback = None,
+    supports_auto_pcc: bool = False,
 ) -> Optional[ValidationDialog]:
     report = validate_document(
         document
@@ -1846,4 +1919,5 @@ def run_validate_tool(
         document=document,
         on_changed=on_changed,
         on_highlight=on_highlight,
+        supports_auto_pcc=supports_auto_pcc,
     )

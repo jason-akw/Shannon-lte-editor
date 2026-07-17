@@ -978,10 +978,17 @@ def copy_combo(
 
 
 # Automatic UL and ULCA rules
+S5300_UL_AUTO_VALUE = 0xFFFF
 SDL_BANDS = {29, 32, 75}
+LAA_DL_ONLY_BANDS = {46}
+NO_UL_BANDS = SDL_BANDS | LAA_DL_ONLY_BANDS
 LOW_BANDS = {5, 8, 12, 13, 14, 17, 18, 19, 20, 26, 28, 29, 71}
 TDD_BANDS = {38, 39, 40, 41, 42, 48}
 NO_4X4_BANDS = LOW_BANDS | {21}
+ALLOWED_LOW_BAND_MIXES = {
+    frozenset({8, 20}),
+    frozenset({20, 28}),
+}
 
 
 @dataclass
@@ -991,17 +998,26 @@ class UlVariantResult:
     message: str
 
 
+def combo_uses_auto_pcc(
+    combo: Combo,
+) -> bool:
+    return bool(combo.components) and all(
+        component.bwClassMimoUl == S5300_UL_AUTO_VALUE
+        for component in combo.components
+    )
+
+
 def blocked_ul_bands(
     combo: Combo,
 ) -> set[int]:
-    # SDL bands never receive uplink. Bands 7 and 38 are also
-    # blocked when both are present in the same downlink combo.
+    # Downlink-only bands never receive uplink. Bands 7 and 38
+    # are also blocked when both are present in the same combo.
     bands = {
         component.band
         for component in combo.components
     }
 
-    blocked = set(SDL_BANDS)
+    blocked = set(NO_UL_BANDS)
 
     if 7 in bands and 38 in bands:
         blocked.update(
@@ -1012,6 +1028,21 @@ def blocked_ul_bands(
         )
 
     return blocked
+
+
+def can_use_auto_pcc(
+    combo: Combo,
+) -> bool:
+    if not combo.components:
+        return False
+
+    blocked = blocked_ul_bands(combo)
+
+    return all(
+        component.bwClassMimoDl != 0
+        and component.band not in blocked
+        for component in combo.components
+    )
 
 
 def first_dl_component_index(
@@ -1075,8 +1106,8 @@ def valid_ul_pair(
     allow_fdd_tdd_ulca: bool = False,
 ) -> bool:
     if (
-        left in SDL_BANDS
-        or right in SDL_BANDS
+        left in NO_UL_BANDS
+        or right in NO_UL_BANDS
     ):
         return False
 
@@ -1084,7 +1115,8 @@ def valid_ul_pair(
         left in LOW_BANDS
         and right in LOW_BANDS
         and left != right
-        and {left, right} != {20, 28}
+        and frozenset({left, right})
+        not in ALLOWED_LOW_BAND_MIXES
     ):
         return False
 
@@ -1106,6 +1138,18 @@ def clear_ul(
     # Remove all uplink assignments from a combo.
     for component in combo.components:
         component.bwClassMimoUl = 0
+
+
+def set_auto_pcc(
+    combo: Combo,
+) -> None:
+    if not can_use_auto_pcc(combo):
+        raise ValueError(
+            "Auto PCC requires every DL component to support uplink."
+        )
+
+    for component in combo.components:
+        component.bwClassMimoUl = S5300_UL_AUTO_VALUE
 
 
 def set_ul_a_indices(combo: Combo, component_indices: tuple[int, ...]) -> None:
@@ -1176,6 +1220,7 @@ def _candidate_ul_variants(
     allow_tdd_aa_ulca: bool = False,
     allow_fdd_tdd_ulca: bool = False,
     include_class_c_ul: bool = True,
+    include_single_ul: bool = True,
 ) -> list[Combo]:
     indices_by_band = dl_indices_by_band(source)
     blocked = blocked_ul_bands(source)
@@ -1183,15 +1228,16 @@ def _candidate_ul_variants(
 
     candidates: list[Combo] = []
 
-    # Normal single-band Class-A UL.
-    for band in unique_bands:
-        indices = indices_by_band[band]
-        if not indices:
-            continue
+    if include_single_ul:
+        # Normal single-band Class-A UL.
+        for band in unique_bands:
+            indices = indices_by_band[band]
+            if not indices:
+                continue
 
-        candidate = copy_combo(source)
-        set_ul_a_indices(candidate, (indices[-1],))
-        candidates.append(candidate)
+            candidate = copy_combo(source)
+            set_ul_a_indices(candidate, (indices[-1],))
+            candidates.append(candidate)
 
     if include_ulca:
         # Inter-band A+A ULCA.
@@ -1222,7 +1268,7 @@ def _candidate_ul_variants(
             candidates.append(candidate)
 
     # Standalone Class-C UL is only generated when requested.
-    if include_class_c_ul:
+    if include_single_ul and include_class_c_ul:
         for index, component in enumerate(source.components):
             class_letter, _mimo = decode_bw_class(component.bwClassMimoDl)
 
@@ -1240,6 +1286,7 @@ def generate_ul_variants(
     allow_fdd_aa_ulca: bool = False,
     allow_tdd_aa_ulca: bool = False,
     allow_fdd_tdd_ulca: bool = False,
+    supports_auto_pcc: bool = False,
 ) -> UlVariantResult:
     if not (
         0
@@ -1253,6 +1300,12 @@ def generate_ul_variants(
     selected_combo = document.combos[
         selected_index
     ]
+
+    selected_has_valid_auto_pcc = (
+        supports_auto_pcc
+        and combo_uses_auto_pcc(selected_combo)
+        and can_use_auto_pcc(selected_combo)
+    )
 
     if first_dl_component_index(
         selected_combo
@@ -1294,6 +1347,9 @@ def generate_ul_variants(
             allow_fdd_tdd_ulca
         ),
         include_class_c_ul=True,
+        include_single_ul=(
+            not selected_has_valid_auto_pcc
+        ),
     )
 
     unique_candidates: list[Combo] = []
@@ -1323,13 +1379,24 @@ def generate_ul_variants(
         )
 
     if not unique_candidates:
+        if (
+            selected_has_valid_auto_pcc
+            and not include_ulca
+        ):
+            message = (
+                "Auto PCC already covers every legal "
+                "single-PCC variant."
+            )
+        else:
+            message = (
+                "All requested legal UL variants "
+                "already exist."
+            )
+
         return UlVariantResult(
             created_count=0,
             modified_original=False,
-            message=(
-                "All requested legal UL variants "
-                "already exist."
-            ),
+            message=message,
         )
 
     selected_has_ul = any(
@@ -1391,14 +1458,27 @@ def generate_ul_variants(
 
 def auto_fill_ul_bands(
     document: ComboDocument,
+    use_auto_pcc: bool = False,
+    supports_auto_pcc: bool = False,
+    target_dl_signatures: Optional[
+        set[tuple]
+    ] = None,
 ) -> int:
-    groups: dict[tuple, Combo] = {}
+    groups: dict[tuple, list[Combo]] = {}
 
     for combo in document.combos:
+        signature = dl_base_signature(combo)
+
+        if (
+            target_dl_signatures is not None
+            and signature not in target_dl_signatures
+        ):
+            continue
+
         groups.setdefault(
-            dl_base_signature(combo),
-            combo,
-        )
+            signature,
+            [],
+        ).append(combo)
 
     existing = {
         full_config_signature(combo)
@@ -1406,8 +1486,8 @@ def auto_fill_ul_bands(
     }
 
     additions: list[Combo] = []
-
-    for source_combo in groups.values():
+    for group in groups.values():
+        source_combo = group[0]
         source = copy_combo(
             source_combo
         )
@@ -1416,6 +1496,31 @@ def auto_fill_ul_bands(
             source
         )
 
+        has_valid_auto_pcc = any(
+            supports_auto_pcc
+            and combo_uses_auto_pcc(combo)
+            and can_use_auto_pcc(combo)
+            for combo in group
+        )
+
+        if has_valid_auto_pcc:
+            continue
+
+        if (
+            supports_auto_pcc
+            and use_auto_pcc
+            and can_use_auto_pcc(source)
+        ):
+            candidate = copy_combo(source)
+            set_auto_pcc(candidate)
+            signature = full_config_signature(candidate)
+
+            if signature not in existing:
+                additions.append(candidate)
+                existing.add(signature)
+
+            continue
+
         candidates = _candidate_ul_variants(
             source,
             include_ulca=False,
@@ -1423,6 +1528,7 @@ def auto_fill_ul_bands(
             allow_tdd_aa_ulca=False,
             allow_fdd_tdd_ulca=False,
             include_class_c_ul=False,
+            include_single_ul=True,
         )
 
         for candidate in candidates:
@@ -1460,15 +1566,28 @@ def auto_fill_ulca(
     allow_fdd_aa_ulca: bool = False,
     allow_tdd_aa_ulca: bool = False,
     allow_fdd_tdd_ulca: bool = False,
+    use_auto_pcc: bool = False,
+    supports_auto_pcc: bool = False,
+    target_dl_signatures: Optional[
+        set[tuple]
+    ] = None,
 ) -> int:
     # Generate legal UL variants for every unique downlink combo.
-    groups: dict[tuple, Combo] = {}
+    groups: dict[tuple, list[Combo]] = {}
 
     for combo in document.combos:
+        signature = dl_base_signature(combo)
+
+        if (
+            target_dl_signatures is not None
+            and signature not in target_dl_signatures
+        ):
+            continue
+
         groups.setdefault(
-            dl_base_signature(combo),
-            combo,
-        )
+            signature,
+            [],
+        ).append(combo)
 
     existing = {
         full_config_signature(combo)
@@ -1476,8 +1595,8 @@ def auto_fill_ulca(
     }
 
     additions: list[Combo] = []
-
-    for source_combo in groups.values():
+    for group in groups.values():
+        source_combo = group[0]
         source = copy_combo(
             source_combo
         )
@@ -1485,6 +1604,31 @@ def auto_fill_ulca(
         clear_ul(
             source
         )
+
+        has_valid_auto_pcc = any(
+            supports_auto_pcc
+            and combo_uses_auto_pcc(combo)
+            and can_use_auto_pcc(combo)
+            for combo in group
+        )
+
+        prefer_auto_pcc = (
+            has_valid_auto_pcc
+            or (
+                use_auto_pcc
+                and supports_auto_pcc
+                and can_use_auto_pcc(source)
+            )
+        )
+
+        if prefer_auto_pcc and not has_valid_auto_pcc:
+            candidate = copy_combo(source)
+            set_auto_pcc(candidate)
+            signature = full_config_signature(candidate)
+
+            if signature not in existing:
+                additions.append(candidate)
+                existing.add(signature)
 
         candidates = _candidate_ul_variants(
             source,
@@ -1499,6 +1643,9 @@ def auto_fill_ulca(
                 allow_fdd_tdd_ulca
             ),
             include_class_c_ul=True,
+            include_single_ul=(
+                not prefer_auto_pcc
+            ),
         )
 
         for candidate in candidates:
@@ -1534,11 +1681,22 @@ def auto_fill_ulca(
 
 def disable_ulca(
     document: ComboDocument,
+    supports_auto_pcc: bool = False,
 ) -> int:
     # Keep at most one legal Class-A uplink assignment per combo.
     changed = 0
 
     for combo in document.combos:
+        if (
+            supports_auto_pcc
+            and combo_uses_auto_pcc(combo)
+        ):
+            if can_use_auto_pcc(combo):
+                continue
+
+            clear_ul(combo)
+            changed += 1
+
         blocked = blocked_ul_bands(
             combo
         )
@@ -1760,26 +1918,26 @@ def validate_document(
                     )
                 )
 
-        sdl_ul_bands = sorted({
+        downlink_only_ul_bands = sorted({
             component.band
             for component in combo.components
             if (
-                component.band in SDL_BANDS
+                component.band in NO_UL_BANDS
                 and component.bwClassMimoUl != 0
             )
         })
 
-        if sdl_ul_bands:
+        if downlink_only_ul_bands:
             issues.append(
                 ValidationIssue(
                     issue_type=VALIDATION_SDL_UL,
                     combo_indices=[index],
                     message=(
-                        f"Combo {index + 1}: SDL cannot have "
-                        "uplink "
+                        f"Combo {index + 1}: downlink-only band(s) "
+                        "cannot have uplink: "
                         + ", ".join(
                             str(band)
-                            for band in sdl_ul_bands
+                            for band in downlink_only_ul_bands
                         )
                         + "."
                     ),
@@ -1848,7 +2006,8 @@ def validate_document(
 
         if (
             len(present_low_bands) > 1
-            and present_low_bands != {20, 28}
+            and frozenset(present_low_bands)
+            not in ALLOWED_LOW_BAND_MIXES
         ):
             issues.append(
                 ValidationIssue(
@@ -1864,7 +2023,7 @@ def validate_document(
                                 present_low_bands
                             )
                         )
-                        + ". Only 20+28 is allowed."
+                        + ". Only 8+20 and 20+28 are allowed."
                     ),
                     fixable=False,
                 )
@@ -2011,6 +2170,7 @@ def fix_validation_issues(
     report: Optional[
         ValidationReport
     ] = None,
+    supports_auto_pcc: bool = False,
 ) -> dict[str, int]:
     if report is None:
         report = validate_document(
@@ -2037,6 +2197,16 @@ def fix_validation_issues(
             for component in combo.components
         }
 
+        if (
+            supports_auto_pcc
+            and combo_uses_auto_pcc(combo)
+            and not can_use_auto_pcc(combo)
+        ):
+            results["invalid_ul_removed"] += len(
+                combo.components
+            )
+            clear_ul(combo)
+
         for component in combo.components:
             invalid_7_38_ul = (
                 7 in bands
@@ -2048,8 +2218,8 @@ def fix_validation_issues(
                 and component.bwClassMimoUl != 0
             )
 
-            invalid_sdl_ul = (
-                component.band in SDL_BANDS
+            invalid_downlink_only_ul = (
+                component.band in NO_UL_BANDS
                 and component.bwClassMimoUl != 0
             )
             
@@ -2066,7 +2236,7 @@ def fix_validation_issues(
 
             if (
                 invalid_7_38_ul
-                or invalid_sdl_ul
+                or invalid_downlink_only_ul
             ):
                 component.bwClassMimoUl = 0
                 results[
@@ -2140,12 +2310,21 @@ def fix_validation_issues(
 
 def repair_and_deduplicate(
     document: ComboDocument,
+    supports_auto_pcc: bool = False,
 ) -> tuple[int, int]:
     # Remove impossible uplink, fill missing uplink, and remove
     # exact DL/class/MIMO/UL duplicates even when metadata differs.
     repaired = 0
 
     for combo in document.combos:
+        if (
+            supports_auto_pcc
+            and combo_uses_auto_pcc(combo)
+            and not can_use_auto_pcc(combo)
+        ):
+            clear_ul(combo)
+            repaired += 1
+
         blocked = blocked_ul_bands(
             combo
         )

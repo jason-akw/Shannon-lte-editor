@@ -11,13 +11,18 @@ from typing import Optional
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 from lz4.block import compress, decompress
 
-from utils import Combo, ComboDocument, Component, ParseError
+from utils import (
+    S5300_UL_AUTO_VALUE,
+    Combo,
+    ComboDocument,
+    Component,
+    ParseError,
+)
 
 
 CLZ4_HEADER = struct.Struct("<4sIII")
 CLZ4_MAGIC = b"CLZ4"
 COMBOS_PER_SEGMENT = 1000
-S5300_UL_AUTO_VALUE = 0xFFFF
 FAMILY_RE = re.compile(r"^(lte_ca(?:_0x[0-9A-Fa-f]+)?)_common$")
 PLMN_PROFILE_NAME = "plmn_mapping_0x13F"
 PLMN_CATEGORY_IDS = "NRCAPA_CA_NV_PLMN_CATEGORY_ID"
@@ -359,6 +364,14 @@ def _validate_document(document: ComboDocument) -> None:
                 "explicit UL classes"
             )
         for component in combo.components:
+            if (
+                component.band == 46
+                and component.bwClassMimoUl != 0
+            ):
+                raise ValueError(
+                    f"Combo {combo_id} assigns unsupported Band 46 uplink"
+                )
+
             for label, value in (
                 ("band", component.band),
                 ("DL class", component.bwClassMimoDl),

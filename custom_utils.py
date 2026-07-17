@@ -3,6 +3,7 @@ from itertools import combinations, product
 from typing import Optional
 
 from utils import (
+    ALLOWED_LOW_BAND_MIXES,
     Component,
     Combo,
     ComboDocument,
@@ -11,10 +12,9 @@ from utils import (
 )
 
 SUPPORTED_LTE_BANDS = {1, 2, 3, 4, 5, 7, 8, 12, 13, 14, 17, 18, 19, 20, 21, 25,
-                       26, 28, 29, 30, 32, 38, 39, 40, 41, 42, 48, 66, 71, 75}
+                       26, 28, 29, 30, 32, 38, 39, 40, 41, 42, 46, 48, 66, 71, 75}
 
 LOW_BANDS = {5, 8, 12, 13, 14, 17, 18, 19, 20, 26, 28, 29, 71}
-SDL_BANDS = {29, 32, 75}
 TDD_BANDS = {38, 39, 40, 41, 42, 48}
 NO_4X4_BANDS = LOW_BANDS | {21}
 
@@ -392,10 +392,10 @@ def valid_low_band_mix(
     if len(present_low_bands) <= 1:
         return True
 
-    return present_low_bands == {
-        20,
-        28,
-    }
+    return (
+        frozenset(present_low_bands)
+        in ALLOWED_LOW_BAND_MIXES
+    )
 
 
 def valid_duplex_mix(
@@ -723,7 +723,7 @@ def generate_custom_combos(
     max_cc: int,
     allow_fdd_tdd: bool,
     default_bcs: Optional[int] = None,
-) -> tuple[int, int]:
+) -> tuple[int, int, set[tuple]]:
     if max_cc not in range(
         2,
         8,
@@ -869,4 +869,5 @@ def generate_custom_combos(
     return (
         len(additions),
         skipped_existing_count,
+        generated_signatures,
     )

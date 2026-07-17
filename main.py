@@ -86,6 +86,8 @@ from utils import (
     ComboDocument,
     Component,
     ParseError,
+    blocked_ul_bands,
+    can_use_auto_pcc,
     copy_combo,
     count_direction_components,
     describe_bcs_mask,
@@ -1057,7 +1059,35 @@ class ComboEditorApp(tk.Tk):
 
                 commit_in_progress = True
 
+                old_band = component.band
                 component.band = band
+
+                try:
+                    if self._is_s5300_auto_ul_combo(combo):
+                        if not can_use_auto_pcc(combo):
+                            raise ValueError(
+                                "Auto PCC cannot include Band 46, SDL, "
+                                "or another blocked uplink band."
+                            )
+                    elif any(
+                        item.bwClassMimoUl != 0
+                        and item.band in blocked_ul_bands(combo)
+                        for item in combo.components
+                    ):
+                        raise ValueError(
+                            "The changed band cannot carry the current "
+                            "uplink assignment."
+                        )
+                except ValueError as exc:
+                    component.band = old_band
+                    commit_in_progress = False
+                    messagebox.showerror(
+                        "Invalid band",
+                        str(exc),
+                        parent=self,
+                    )
+                    editor.focus_set()
+                    return
 
                 self._finish_component_cell_edit(
                     component_index,
@@ -1162,11 +1192,24 @@ class ComboEditorApp(tk.Tk):
                 if raw_value is None:
                     return
 
-                self._set_component_ul_value(
-                    combo,
-                    component_index,
-                    int(raw_value),
-                )
+                try:
+                    self._set_component_ul_value(
+                        combo,
+                        component_index,
+                        int(raw_value),
+                    )
+                except ValueError as exc:
+                    messagebox.showerror(
+                        "Invalid uplink",
+                        str(exc),
+                        parent=self,
+                    )
+                    editor.set(
+                        self._ul_label(
+                            component.bwClassMimoUl
+                        )
+                    )
+                    return
 
                 self._finish_component_cell_edit(
                     component_index,
@@ -1374,6 +1417,9 @@ class ComboEditorApp(tk.Tk):
             on_changed=(
                 self._on_document_tool_changed
             ),
+            supports_auto_pcc=(
+                self.s5300_family is not None
+            ),
         )
 
     def open_combo_pruning_tool(
@@ -1434,6 +1480,9 @@ class ComboEditorApp(tk.Tk):
             document=self.document,
             on_changed=self._on_document_tool_changed,
             on_highlight=self._highlight_validation_issues,
+            supports_auto_pcc=(
+                self.s5300_family is not None
+            ),
         )
         
     def _highlight_validation_issues(
@@ -1583,8 +1632,23 @@ class ComboEditorApp(tk.Tk):
         component_index: int,
         value: int,
     ) -> None:
+        if (
+            value not in {0, S5300_UL_AUTO_VALUE}
+            and combo.components[component_index].band
+            in blocked_ul_bands(combo)
+        ):
+            raise ValueError(
+                "The selected band cannot be used for uplink in this combo."
+            )
+
         if self.s5300_family is not None:
             if value == S5300_UL_AUTO_VALUE:
+                if not can_use_auto_pcc(combo):
+                    raise ValueError(
+                        "Auto PCC cannot include Band 46, SDL, "
+                        "or another blocked uplink band."
+                    )
+
                 for component in combo.components:
                     component.bwClassMimoUl = S5300_UL_AUTO_VALUE
                 return
@@ -2309,6 +2373,9 @@ class ComboEditorApp(tk.Tk):
                 
                 allow_tdd_aa_ulca=False,
                 allow_fdd_tdd_ulca=False,
+                supports_auto_pcc=(
+                    self.s5300_family is not None
+                ),
             )
 
         except ValueError as exc:
@@ -2883,11 +2950,11 @@ class ComboEditorApp(tk.Tk):
             return
 
         try:
-            component.band = self._int_value(
+            band_value = self._int_value(
                 self.band_var.get(),
                 "Band",
             )
-            component.bwClassMimoDl = (
+            dl_value = (
                 self._dropdown_value(
                     self.dl_var.get(),
                     DL_LABEL_TO_VALUE,
@@ -2906,11 +2973,25 @@ class ComboEditorApp(tk.Tk):
             )
             return
 
-        self._set_component_ul_value(
-            combo,
-            component_index,
-            ul_value,
-        )
+        old_band = component.band
+        old_dl_value = component.bwClassMimoDl
+        component.band = band_value
+        component.bwClassMimoDl = dl_value
+
+        try:
+            self._set_component_ul_value(
+                combo,
+                component_index,
+                ul_value,
+            )
+        except ValueError as exc:
+            component.band = old_band
+            component.bwClassMimoDl = old_dl_value
+            messagebox.showerror(
+                "Invalid uplink",
+                str(exc),
+            )
+            return
 
         self.refresh_component_tree(
             self.selected_component_index
